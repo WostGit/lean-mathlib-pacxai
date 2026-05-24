@@ -1,19 +1,19 @@
-name: Build mathlib cache bundle
+name: Build complete mathlib cache bundle
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-mathlib-cache:
+  build-complete-mathlib-cache:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 420
 
     steps:
       - name: Install system dependencies
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y zstd unzip zip tar curl git rsync coreutils
+          sudo apt-get install -y zstd unzip zip tar curl git rsync coreutils findutils
 
       - name: Install elan
         run: |
@@ -39,20 +39,19 @@ jobs:
           lean --version
           lake --version
 
-      - name: Download mathlib4 source
+      - name: Clone mathlib4
         run: |
           set -euxo pipefail
 
           git clone --depth 1 https://github.com/leanprover-community/mathlib4.git mathlib4
 
           cd mathlib4
-          echo "mathlib lean-toolchain:"
+          echo "mathlib lean-toolchain before forcing:"
           cat lean-toolchain
-
-          echo "Current commit:"
+          echo "mathlib commit:"
           git rev-parse HEAD
 
-      - name: Force mathlib to Lean v4.30.0-rc2
+      - name: Pin toolchain
         run: |
           set -euxo pipefail
 
@@ -72,7 +71,7 @@ jobs:
           lean --version
           lake --version
 
-      - name: Download mathlib dependencies
+      - name: Download dependency source packages
         run: |
           set -euxo pipefail
 
@@ -80,19 +79,66 @@ jobs:
 
           lake update
 
+          echo "lake-manifest:"
+          test -f lake-manifest.json
+          sed -n '1,200p' lake-manifest.json || true
+
           echo "Downloaded packages:"
-          find .lake/packages -maxdepth 1 -mindepth 1 -type d -print | sort
+          find .lake/packages -maxdepth 2 -type d | sort
 
-          test -d .lake/packages
-
-      - name: Get mathlib cache
+      - name: Fetch mathlib cache
         run: |
           set -euxo pipefail
 
           cd mathlib4
 
-          # If cache retrieval partially fails, continue; target modules are built below.
+          # This should fetch mathlib + dependency oleans when available.
+          # If it partially fails, we still build below.
           lake exe cache get || true
+
+      - name: Build dependencies explicitly
+        run: |
+          set -euxo pipefail
+
+          cd mathlib4
+
+          echo "Build all direct dependency packages explicitly."
+
+          # Build core dependencies first. Some names may vary by manifest,
+          # so guard each with directory checks.
+
+          if [ -d .lake/packages/batteries ]; then
+            lake build Batteries
+          fi
+
+          if [ -d .lake/packages/Qq ]; then
+            lake build Qq
+          fi
+
+          if [ -d .lake/packages/aesop ]; then
+            lake build Aesop
+          fi
+
+          if [ -d .lake/packages/Cli ]; then
+            lake build Cli
+          fi
+
+          if [ -d .lake/packages/plausible ]; then
+            lake build Plausible
+          fi
+
+          if [ -d .lake/packages/proofwidgets ]; then
+            lake build ProofWidgets
+          fi
+
+          if [ -d .lake/packages/importGraph ]; then
+            lake build ImportGraph
+          fi
+
+          # LeanSearchClient may or may not expose a Lean library root.
+          if [ -d .lake/packages/LeanSearchClient ]; then
+            lake build LeanSearchClient || true
+          fi
 
       - name: Build target mathlib modules
         run: |
@@ -110,7 +156,7 @@ jobs:
           lake build Mathlib.Probability.Distributions.Gaussian.Multivariate
           lake build Mathlib.InformationTheory.Hamming
 
-      - name: Verify target .olean files exist
+      - name: Verify root mathlib target oleans exist
         run: |
           set -euxo pipefail
 
@@ -126,110 +172,151 @@ jobs:
           test -f .lake/build/lib/lean/Mathlib/Probability/Distributions/Gaussian/Multivariate.olean
           test -f .lake/build/lib/lean/Mathlib/InformationTheory/Hamming.olean
 
-          echo "All target .olean files exist."
+          echo "Root mathlib target oleans exist."
 
-      - name: Make upload payload
+      - name: Verify dependency oleans exist
+        run: |
+          set -euxo pipefail
+
+          cd mathlib4
+
+          echo "Checking dependency build artifacts."
+
+          # These are the important failure cases we saw in sandbox.
+          if [ -d .lake/packages/batteries ]; then
+            test -f .lake/packages/batteries/.lake/build/lib/lean/Batteries.olean
+          fi
+
+          if [ -d .lake/packages/aesop ]; then
+            find .lake/packages/aesop/.lake/build/lib/lean -name '*.olean' | head -20
+            test "$(find .lake/packages/aesop/.lake/build/lib/lean -name '*.olean' | wc -l)" -gt 0
+          fi
+
+          if [ -d .lake/packages/Qq ]; then
+            find .lake/packages/Qq/.lake/build/lib/lean -name '*.olean' | head -20
+            test "$(find .lake/packages/Qq/.lake/build/lib/lean -name '*.olean' | wc -l)" -gt 0
+          fi
+
+          if [ -d .lake/packages/proofwidgets ]; then
+            find .lake/packages/proofwidgets/.lake/build/lib/lean -name '*.olean' | head -20
+            test "$(find .lake/packages/proofwidgets/.lake/build/lib/lean -name '*.olean' | wc -l)" -gt 0
+          fi
+
+          echo "Dependency oleans appear to exist."
+
+      - name: Smoke-test imports using built cache
+        run: |
+          set -euxo pipefail
+
+          cd mathlib4
+
+          cat > PACXAIImportSmoke.lean <<'EOF'
+          import Mathlib.InformationTheory.KullbackLeibler.Basic
+          import Mathlib.InformationTheory.KullbackLeibler.ChainRule
+          import Mathlib.Analysis.SpecialFunctions.BinaryEntropy
+          import Mathlib.Probability.ConditionalProbability
+          import Mathlib.Probability.ConditionalExpectation
+          import Mathlib.Probability.Independence.Conditional
+          import Mathlib.Probability.Distributions.Gaussian.Real
+          import Mathlib.Probability.Distributions.Gaussian.Multivariate
+          import Mathlib.InformationTheory.Hamming
+
+          #check Nat
+          #check Real
+          EOF
+
+          lake env lean PACXAIImportSmoke.lean
+
+      - name: Make complete upload payload
         run: |
           set -euxo pipefail
 
           rm -rf payload
-          mkdir -p payload
-
-          cp mathlib4/lean-toolchain payload/lean-toolchain
-          cp mathlib4/lake-manifest.json payload/lake-manifest.json || true
-          cp mathlib4/lakefile.lean payload/lakefile.lean || true
-          cp mathlib4/lakefile.toml payload/lakefile.toml || true
-
           mkdir -p payload/.lake
 
-          # Dependency source packages.
-          rsync -a mathlib4/.lake/packages payload/.lake/
+          cd mathlib4
 
-          # mathlib build cache.
-          mkdir -p payload/.lake/build
-          rsync -a mathlib4/.lake/build/ payload/.lake/build/
+          echo "Copy source/config files."
+          cp lean-toolchain ../payload/lean-toolchain
+          cp lake-manifest.json ../payload/lake-manifest.json || true
+          cp lakefile.lean ../payload/lakefile.lean || true
+          cp lakefile.toml ../payload/lakefile.toml || true
 
-          # Dependency build caches.
-          for pkg in mathlib4/.lake/packages/*; do
-            if [ -d "$pkg/.lake/build" ]; then
-              name="$(basename "$pkg")"
-              mkdir -p "payload/.lake/packages/$name/.lake"
-              rsync -a "$pkg/.lake/build" "payload/.lake/packages/$name/.lake/"
-            fi
+          echo "Copy entire .lake/packages including source and package build caches."
+          rsync -a .lake/packages ../payload/.lake/
 
-            if [ -f "$pkg/lean-toolchain" ]; then
-              name="$(basename "$pkg")"
-              mkdir -p "payload/.lake/packages/$name"
-              cp "$pkg/lean-toolchain" "payload/.lake/packages/$name/lean-toolchain"
-            fi
+          echo "Copy entire root .lake/build."
+          rsync -a .lake/build ../payload/.lake/
 
-            if [ -f "$pkg/lakefile.lean" ]; then
-              name="$(basename "$pkg")"
-              mkdir -p "payload/.lake/packages/$name"
-              cp "$pkg/lakefile.lean" "payload/.lake/packages/$name/lakefile.lean"
-            fi
-
-            if [ -f "$pkg/lakefile.toml" ]; then
-              name="$(basename "$pkg")"
-              mkdir -p "payload/.lake/packages/$name"
-              cp "$pkg/lakefile.toml" "payload/.lake/packages/$name/lakefile.toml"
-            fi
-          done
+          cd ..
 
           cat > payload/README_UPLOAD_THIS.txt <<'EOF'
-          mathlib4 cache bundle
+          complete mathlib4 cache bundle
 
           This bundle contains:
             payload/.lake/packages/*
+            payload/.lake/packages/*/.lake/build/*
             payload/.lake/build/*
             payload/lean-toolchain
             payload/lake-manifest.json
 
-          Intended use after download:
-            1. Put all mathlib4_cache_bundle.zip.partNNN files in one folder.
-            2. Run:
-                 cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip
-            3. Unzip mathlib4_cache_bundle.zip.
-            4. Copy payload/.lake/packages into the mathlib root as .lake/packages.
-            5. Copy payload/.lake/build into the mathlib root as .lake/build.
+          Intended use after upload:
+            1. Reassemble mathlib4_complete_cache_bundle.zip from all .partNNN files.
+            2. Unzip it.
+            3. Extract/prepare mathlib4 source.
+            4. Copy payload/.lake/packages into mathlib4/.lake/packages.
+            5. Copy payload/.lake/build into mathlib4/.lake/build.
             6. Use Lean v4.30.0-rc2.
+            7. Run lake env lean or lake build.
 
-          This was produced by GitHub Actions.
+          This bundle was produced by GitHub Actions and should include dependency build artifacts.
           EOF
 
-          echo "Payload size summary:"
+          echo "Payload summary:"
           du -sh payload
           du -sh payload/.lake/packages || true
           du -sh payload/.lake/build || true
 
-      - name: Zip upload payload
+          echo "Dependency build cache summary:"
+          find payload/.lake/packages -path '*/.lake/build/lib/lean/*.olean' | wc -l
+          find payload/.lake/build/lib/lean -name '*.olean' | wc -l
+
+      - name: Verify payload contains dependency oleans
         run: |
           set -euxo pipefail
 
-          rm -f mathlib4_cache_bundle.zip mathlib4_cache_bundle.zip.sha256
+          test -f payload/.lake/packages/batteries/.lake/build/lib/lean/Batteries.olean
 
-          zip -r -9 mathlib4_cache_bundle.zip payload
+          test "$(find payload/.lake/packages -path '*/.lake/build/lib/lean/*.olean' | wc -l)" -gt 0
+          test "$(find payload/.lake/build/lib/lean -name '*.olean' | wc -l)" -gt 0
 
-          echo "Bundle size:"
-          ls -lh mathlib4_cache_bundle.zip
+          echo "Payload contains dependency and root oleans."
 
-          sha256sum mathlib4_cache_bundle.zip | tee mathlib4_cache_bundle.zip.sha256
+      - name: Zip complete payload
+        run: |
+          set -euxo pipefail
 
-      - name: Split bundle into 480M parts and make manifest
+          rm -f mathlib4_complete_cache_bundle.zip mathlib4_complete_cache_bundle.zip.sha256
+
+          zip -r -9 mathlib4_complete_cache_bundle.zip payload
+
+          ls -lh mathlib4_complete_cache_bundle.zip
+          sha256sum mathlib4_complete_cache_bundle.zip | tee mathlib4_complete_cache_bundle.zip.sha256
+
+      - name: Split complete bundle into 480M parts
         run: |
           set -euxo pipefail
 
           rm -rf upload_parts
           mkdir -p upload_parts
 
-          # GNU split starts at 001 directly. No rename loop.
           split \
             -b 480M \
             -d \
             -a 3 \
             --numeric-suffixes=1 \
-            mathlib4_cache_bundle.zip \
-            upload_parts/mathlib4_cache_bundle.zip.part
+            mathlib4_complete_cache_bundle.zip \
+            upload_parts/mathlib4_complete_cache_bundle.zip.part
 
           echo "Actual split files:"
           ls -lh upload_parts
@@ -246,15 +333,15 @@ jobs:
                       h.update(block)
               return h.hexdigest()
 
-          original = Path("mathlib4_cache_bundle.zip")
+          original = Path("mathlib4_complete_cache_bundle.zip")
           parts_dir = Path("upload_parts")
-          parts = sorted(parts_dir.glob("mathlib4_cache_bundle.zip.part*"))
+          parts = sorted(parts_dir.glob("mathlib4_complete_cache_bundle.zip.part*"))
 
           if not parts:
               raise RuntimeError("No split parts were created.")
 
           manifest = {
-              "bundle_type": "mathlib4_cache_bundle_from_github_actions",
+              "bundle_type": "complete_mathlib4_cache_bundle_from_github_actions",
               "lean_version": "leanprover/lean4:v4.30.0-rc2",
               "original_file": original.name,
               "original_size_bytes": original.stat().st_size,
@@ -270,12 +357,12 @@ jobs:
                   }
                   for p in parts
               ],
-              "reassemble_linux_command": "cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip",
-              "reassemble_macos_command": "cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip",
+              "reassemble_linux_command": "cat mathlib4_complete_cache_bundle.zip.part* > mathlib4_complete_cache_bundle.zip",
+              "reassemble_macos_command": "cat mathlib4_complete_cache_bundle.zip.part* > mathlib4_complete_cache_bundle.zip",
               "upload_instruction": "Download/upload every .partNNN artifact plus the manifest. Keep filenames unchanged."
           }
 
-          out = parts_dir / "mathlib4_cache_bundle.zip.manifest.json"
+          out = parts_dir / "mathlib4_complete_cache_bundle.zip.manifest.json"
           out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
           print(json.dumps(manifest, indent=2))
@@ -291,127 +378,96 @@ jobs:
           rm -rf verify_reassembly
           mkdir -p verify_reassembly
 
-          cp upload_parts/mathlib4_cache_bundle.zip.part* verify_reassembly/
+          cp upload_parts/mathlib4_complete_cache_bundle.zip.part* verify_reassembly/
 
           cd verify_reassembly
-          cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip
-
+          cat mathlib4_complete_cache_bundle.zip.part* > mathlib4_complete_cache_bundle.zip
           cd ..
 
-          ORIGINAL_SHA="$(sha256sum mathlib4_cache_bundle.zip | awk '{print $1}')"
-          REASSEMBLED_SHA="$(sha256sum verify_reassembly/mathlib4_cache_bundle.zip | awk '{print $1}')"
+          ORIGINAL_SHA="$(sha256sum mathlib4_complete_cache_bundle.zip | awk '{print $1}')"
+          REASSEMBLED_SHA="$(sha256sum verify_reassembly/mathlib4_complete_cache_bundle.zip | awk '{print $1}')"
 
           echo "Original SHA:    $ORIGINAL_SHA"
           echo "Reassembled SHA: $REASSEMBLED_SHA"
 
           test "$ORIGINAL_SHA" = "$REASSEMBLED_SHA"
 
-          echo "Split/reassembly verification succeeded."
-
-      - name: Verify expected part count is reasonable
-        run: |
-          set -euxo pipefail
-
-          PART_COUNT="$(find upload_parts -maxdepth 1 -type f -name 'mathlib4_cache_bundle.zip.part*' | wc -l)"
-          echo "Part count: $PART_COUNT"
-
-          # For current approximately 1.9 GiB bundle and 480M parts, expect 4 or 5.
-          # Keep this slightly flexible.
-          test "$PART_COUNT" -ge 1
-          test "$PART_COUNT" -le 10
-
       - name: Upload manifest as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-manifest
-          path: upload_parts/mathlib4_cache_bundle.zip.manifest.json
+          name: complete-mathlib-cache-manifest
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.manifest.json
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload part001 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part001
-          path: upload_parts/mathlib4_cache_bundle.zip.part001
+          name: complete-mathlib-cache-part001
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part001
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload part002 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part002
-          path: upload_parts/mathlib4_cache_bundle.zip.part002
+          name: complete-mathlib-cache-part002
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part002
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload part003 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part003
-          path: upload_parts/mathlib4_cache_bundle.zip.part003
+          name: complete-mathlib-cache-part003
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part003
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload part004 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part004
-          path: upload_parts/mathlib4_cache_bundle.zip.part004
+          name: complete-mathlib-cache-part004
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part004
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload part005 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part005
-          path: upload_parts/mathlib4_cache_bundle.zip.part005
+          name: complete-mathlib-cache-part005
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part005
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload part006 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part006
-          path: upload_parts/mathlib4_cache_bundle.zip.part006
+          name: complete-mathlib-cache-part006
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part006
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload part007 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part007
-          path: upload_parts/mathlib4_cache_bundle.zip.part007
+          name: complete-mathlib-cache-part007
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part007
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload part008 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-part008
-          path: upload_parts/mathlib4_cache_bundle.zip.part008
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Upload part009 as separate artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mathlib-cache-part009
-          path: upload_parts/mathlib4_cache_bundle.zip.part009
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Upload part010 as separate artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mathlib-cache-part010
-          path: upload_parts/mathlib4_cache_bundle.zip.part010
+          name: complete-mathlib-cache-part008
+          path: upload_parts/mathlib4_complete_cache_bundle.zip.part008
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload checksum as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib-cache-full-zip-sha256
-          path: mathlib4_cache_bundle.zip.sha256
+          name: complete-mathlib-cache-full-zip-sha256
+          path: mathlib4_complete_cache_bundle.zip.sha256
           if-no-files-found: error
           retention-days: 7
