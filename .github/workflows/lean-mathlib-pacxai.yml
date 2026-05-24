@@ -25,8 +25,17 @@ jobs:
       - name: Install Lean v4.30.0-rc2
         run: |
           set -euxo pipefail
-          elan toolchain install leanprover/lean4:v4.30.0-rc2
-          elan default leanprover/lean4:v4.30.0-rc2
+
+          TOOLCHAIN="leanprover/lean4:v4.30.0-rc2"
+
+          if elan toolchain list | grep -Fxq "$TOOLCHAIN"; then
+            echo "Toolchain already installed: $TOOLCHAIN"
+          else
+            elan toolchain install "$TOOLCHAIN"
+          fi
+
+          elan default "$TOOLCHAIN"
+
           lean --version
           lake --version
 
@@ -42,8 +51,18 @@ jobs:
         run: |
           set -euxo pipefail
           cd mathlib4
+
           echo "leanprover/lean4:v4.30.0-rc2" > lean-toolchain
-          elan toolchain install "$(cat lean-toolchain)"
+          TOOLCHAIN="$(cat lean-toolchain)"
+
+          if elan toolchain list | grep -Fxq "$TOOLCHAIN"; then
+            echo "Toolchain already installed: $TOOLCHAIN"
+          else
+            elan toolchain install "$TOOLCHAIN"
+          fi
+
+          elan default "$TOOLCHAIN"
+
           lean --version
           lake --version
 
@@ -83,21 +102,21 @@ jobs:
           rm -rf payload
           mkdir -p payload
 
-          # Source identifiers.
           cp mathlib4/lean-toolchain payload/lean-toolchain
           cp mathlib4/lake-manifest.json payload/lake-manifest.json || true
           cp mathlib4/lakefile.lean payload/lakefile.lean || true
           cp mathlib4/lakefile.toml payload/lakefile.toml || true
 
-          # Dependency source packages.
           mkdir -p payload/.lake
+
+          # Source dependencies
           rsync -a mathlib4/.lake/packages payload/.lake/
 
-          # Build cache for mathlib itself.
+          # mathlib build cache
           mkdir -p payload/.lake/build
           rsync -a mathlib4/.lake/build/ payload/.lake/build/
 
-          # Build caches for dependencies.
+          # dependency build caches
           for pkg in mathlib4/.lake/packages/*; do
             if [ -d "$pkg/.lake/build" ]; then
               name="$(basename "$pkg")"
@@ -146,6 +165,7 @@ jobs:
       - name: Zip upload payload
         run: |
           set -euxo pipefail
+
           zip -r -9 mathlib4_cache_bundle.zip payload
 
           echo "Bundle size:"
@@ -159,12 +179,10 @@ jobs:
 
           mkdir -p upload_parts
 
-          # 480 MiB parts, below ChatGPT's 512 MB limit.
           split -b 480M -d -a 3 \
             mathlib4_cache_bundle.zip \
             upload_parts/mathlib4_cache_bundle.zip.part
 
-          # Rename split output from part000 to part001, etc.
           i=1
           for f in upload_parts/mathlib4_cache_bundle.zip.part*; do
             new="$(printf 'upload_parts/mathlib4_cache_bundle.zip.part%03d' "$i")"
