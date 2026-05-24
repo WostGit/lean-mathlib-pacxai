@@ -42,14 +42,20 @@ jobs:
       - name: Download mathlib4 source
         run: |
           set -euxo pipefail
+
           git clone --depth 1 https://github.com/leanprover-community/mathlib4.git mathlib4
+
           cd mathlib4
           echo "mathlib lean-toolchain:"
           cat lean-toolchain
 
+          echo "Current commit:"
+          git rev-parse HEAD
+
       - name: Force mathlib to Lean v4.30.0-rc2
         run: |
           set -euxo pipefail
+
           cd mathlib4
 
           echo "leanprover/lean4:v4.30.0-rc2" > lean-toolchain
@@ -69,6 +75,7 @@ jobs:
       - name: Download mathlib dependencies
         run: |
           set -euxo pipefail
+
           cd mathlib4
 
           lake update
@@ -76,16 +83,21 @@ jobs:
           echo "Downloaded packages:"
           find .lake/packages -maxdepth 1 -mindepth 1 -type d -print | sort
 
+          test -d .lake/packages
+
       - name: Get mathlib cache
         run: |
           set -euxo pipefail
+
           cd mathlib4
 
-          lake exe cache get
+          # If cache retrieval partially fails, continue; target modules are built below.
+          lake exe cache get || true
 
       - name: Build target mathlib modules
         run: |
           set -euxo pipefail
+
           cd mathlib4
 
           lake build Mathlib.InformationTheory.KullbackLeibler.Basic
@@ -97,6 +109,24 @@ jobs:
           lake build Mathlib.Probability.Distributions.Gaussian.Real
           lake build Mathlib.Probability.Distributions.Gaussian.Multivariate
           lake build Mathlib.InformationTheory.Hamming
+
+      - name: Verify target .olean files exist
+        run: |
+          set -euxo pipefail
+
+          cd mathlib4
+
+          test -f .lake/build/lib/lean/Mathlib/InformationTheory/KullbackLeibler/Basic.olean
+          test -f .lake/build/lib/lean/Mathlib/InformationTheory/KullbackLeibler/ChainRule.olean
+          test -f .lake/build/lib/lean/Mathlib/Analysis/SpecialFunctions/BinaryEntropy.olean
+          test -f .lake/build/lib/lean/Mathlib/Probability/ConditionalProbability.olean
+          test -f .lake/build/lib/lean/Mathlib/Probability/ConditionalExpectation.olean
+          test -f .lake/build/lib/lean/Mathlib/Probability/Independence/Conditional.olean
+          test -f .lake/build/lib/lean/Mathlib/Probability/Distributions/Gaussian/Real.olean
+          test -f .lake/build/lib/lean/Mathlib/Probability/Distributions/Gaussian/Multivariate.olean
+          test -f .lake/build/lib/lean/Mathlib/InformationTheory/Hamming.olean
+
+          echo "All target .olean files exist."
 
       - name: Make upload payload
         run: |
@@ -112,14 +142,14 @@ jobs:
 
           mkdir -p payload/.lake
 
-          # Source dependencies.
+          # Dependency source packages.
           rsync -a mathlib4/.lake/packages payload/.lake/
 
           # mathlib build cache.
           mkdir -p payload/.lake/build
           rsync -a mathlib4/.lake/build/ payload/.lake/build/
 
-          # dependency build caches.
+          # Dependency build caches.
           for pkg in mathlib4/.lake/packages/*; do
             if [ -d "$pkg/.lake/build" ]; then
               name="$(basename "$pkg")"
@@ -167,9 +197,16 @@ jobs:
           This was produced by GitHub Actions.
           EOF
 
+          echo "Payload size summary:"
+          du -sh payload
+          du -sh payload/.lake/packages || true
+          du -sh payload/.lake/build || true
+
       - name: Zip upload payload
         run: |
           set -euxo pipefail
+
+          rm -f mathlib4_cache_bundle.zip mathlib4_cache_bundle.zip.sha256
 
           zip -r -9 mathlib4_cache_bundle.zip payload
 
@@ -185,16 +222,17 @@ jobs:
           rm -rf upload_parts
           mkdir -p upload_parts
 
-          split -b 480M -d -a 3 \
+          # GNU split starts at 001 directly. No rename loop.
+          split \
+            -b 480M \
+            -d \
+            -a 3 \
+            --numeric-suffixes=1 \
             mathlib4_cache_bundle.zip \
             upload_parts/mathlib4_cache_bundle.zip.part
 
-          i=1
-          for f in upload_parts/mathlib4_cache_bundle.zip.part*; do
-            new="$(printf 'upload_parts/mathlib4_cache_bundle.zip.part%03d' "$i")"
-            mv "$f" "$new"
-            i=$((i+1))
-          done
+          echo "Actual split files:"
+          ls -lh upload_parts
 
           python3 - <<'PY'
           import hashlib
@@ -211,6 +249,9 @@ jobs:
           original = Path("mathlib4_cache_bundle.zip")
           parts_dir = Path("upload_parts")
           parts = sorted(parts_dir.glob("mathlib4_cache_bundle.zip.part*"))
+
+          if not parts:
+              raise RuntimeError("No split parts were created.")
 
           manifest = {
               "bundle_type": "mathlib4_cache_bundle_from_github_actions",
@@ -240,8 +281,44 @@ jobs:
           print(json.dumps(manifest, indent=2))
           PY
 
-          echo "Upload parts:"
+          echo "Final upload parts:"
           ls -lh upload_parts
+
+      - name: Verify split parts reassemble correctly
+        run: |
+          set -euxo pipefail
+
+          rm -rf verify_reassembly
+          mkdir -p verify_reassembly
+
+          cp upload_parts/mathlib4_cache_bundle.zip.part* verify_reassembly/
+
+          cd verify_reassembly
+          cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip
+
+          cd ..
+
+          ORIGINAL_SHA="$(sha256sum mathlib4_cache_bundle.zip | awk '{print $1}')"
+          REASSEMBLED_SHA="$(sha256sum verify_reassembly/mathlib4_cache_bundle.zip | awk '{print $1}')"
+
+          echo "Original SHA:    $ORIGINAL_SHA"
+          echo "Reassembled SHA: $REASSEMBLED_SHA"
+
+          test "$ORIGINAL_SHA" = "$REASSEMBLED_SHA"
+
+          echo "Split/reassembly verification succeeded."
+
+      - name: Verify expected part count is reasonable
+        run: |
+          set -euxo pipefail
+
+          PART_COUNT="$(find upload_parts -maxdepth 1 -type f -name 'mathlib4_cache_bundle.zip.part*' | wc -l)"
+          echo "Part count: $PART_COUNT"
+
+          # For current approximately 1.9 GiB bundle and 480M parts, expect 4 or 5.
+          # Keep this slightly flexible.
+          test "$PART_COUNT" -ge 1
+          test "$PART_COUNT" -le 10
 
       - name: Upload manifest as separate artifact
         uses: actions/upload-artifact@v4
@@ -256,7 +333,7 @@ jobs:
         with:
           name: mathlib-cache-part001
           path: upload_parts/mathlib4_cache_bundle.zip.part001
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 7
 
       - name: Upload part002 as separate artifact
