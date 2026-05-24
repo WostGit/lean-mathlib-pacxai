@@ -1,204 +1,238 @@
-name: Lean mathlib PACXAI test
+name: Build mathlib cache bundle
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - master
-  pull_request:
 
 jobs:
-  test-lean-mathlib:
-    name: Build PACXAI with Lean/mathlib
+  build-mathlib-cache:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 90
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Show repository files
+      - name: Install system dependencies
         run: |
-          echo "Repository root:"
-          pwd
-          echo
-          echo "Files:"
-          find . -maxdepth 3 -type f | sort | sed 's#^\./##'
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd unzip zip tar curl git rsync
 
       - name: Install elan
         run: |
           set -euxo pipefail
-          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
+            | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
-      - name: Verify elan
+      - name: Install Lean v4.30.0-rc2
         run: |
           set -euxo pipefail
-          elan --version
+          elan toolchain install leanprover/lean4:v4.30.0-rc2
+          elan default leanprover/lean4:v4.30.0-rc2
+          lean --version
+          lake --version
 
-      - name: Ensure Lean toolchain file
+      - name: Download mathlib4 source
         run: |
           set -euxo pipefail
-
-          if [ ! -f lean-toolchain ]; then
-            echo "No lean-toolchain found. Creating one pinned to Lean v4.30.0-rc2."
-            echo "leanprover/lean4:v4.30.0-rc2" > lean-toolchain
-          fi
-
-          echo "lean-toolchain:"
+          git clone --depth 1 https://github.com/leanprover-community/mathlib4.git mathlib4
+          cd mathlib4
+          echo "mathlib lean-toolchain:"
           cat lean-toolchain
 
-      - name: Install selected Lean toolchain
+      - name: Force mathlib to Lean v4.30.0-rc2
         run: |
           set -euxo pipefail
+          cd mathlib4
+          echo "leanprover/lean4:v4.30.0-rc2" > lean-toolchain
           elan toolchain install "$(cat lean-toolchain)"
           lean --version
           lake --version
 
-      - name: Create lakefile if missing
+      - name: Download mathlib dependencies
         run: |
           set -euxo pipefail
-
-          if [ ! -f lakefile.lean ] && [ ! -f lakefile.toml ]; then
-            cat > lakefile.lean <<'EOF'
-          import Lake
-          open Lake DSL
-
-          package «pacxai» where
-            -- add package configuration options here
-
-          require mathlib from git
-            "https://github.com/leanprover-community/mathlib4.git" @ "master"
-
-          @[default_target]
-          lean_lib PACXAI where
-            roots := #[`PACXAI]
-          EOF
-          fi
-
-          echo "Lake file:"
-          if [ -f lakefile.lean ]; then
-            cat lakefile.lean
-          else
-            cat lakefile.toml
-          fi
-
-      - name: Ensure PACXAI root file if missing
-        run: |
-          set -euxo pipefail
-
-          mkdir -p PACXAI
-
-          if [ ! -f PACXAI.lean ]; then
-            cat > PACXAI.lean <<'EOF'
-          import PACXAI.Level2
-          import PACXAI.Level3
-          EOF
-          fi
-
-          if [ ! -f PACXAI/Level2.lean ]; then
-            cat > PACXAI/Level2.lean <<'EOF'
-          /-
-          Placeholder Level2 file.
-
-          Replace this with the PACXAI/Level2.lean file from the project zip if it
-          is not already committed to the repository.
-          -/
-
-          namespace PACXAI
-
-          def helloLevel2 : Nat := 2
-
-          theorem helloLevel2_ok : helloLevel2 = 2 := rfl
-
-          end PACXAI
-          EOF
-          fi
-
-          if [ ! -f PACXAI/Level3.lean ]; then
-            cat > PACXAI/Level3.lean <<'EOF'
-          /-
-          Placeholder Level3 file.
-
-          Replace this with the PACXAI/Level3.lean file from the project zip if it
-          is not already committed to the repository.
-          -/
-
-          namespace PACXAI
-
-          def helloLevel3 : Nat := 3
-
-          theorem helloLevel3_ok : helloLevel3 = 3 := rfl
-
-          end PACXAI
-          EOF
-          fi
-
-      - name: Lake update
-        run: |
-          set -euxo pipefail
+          cd mathlib4
           lake update
+          echo "Downloaded packages:"
+          find .lake/packages -maxdepth 1 -mindepth 1 -type d -print | sort
 
       - name: Get mathlib cache
         run: |
           set -euxo pipefail
-          lake exe cache get || true
+          cd mathlib4
+          lake exe cache get
 
-      - name: Build project
+      - name: Build target mathlib modules
         run: |
           set -euxo pipefail
-          lake build 2>&1 | tee lean-build.log
+          cd mathlib4
 
-      - name: Check for forbidden proof holes
-        run: |
-          set -euxo pipefail
+          lake build Mathlib.InformationTheory.KullbackLeibler.Basic
+          lake build Mathlib.InformationTheory.KullbackLeibler.ChainRule
+          lake build Mathlib.Analysis.SpecialFunctions.BinaryEntropy
+          lake build Mathlib.Probability.ConditionalProbability
+          lake build Mathlib.Probability.ConditionalExpectation
+          lake build Mathlib.Probability.Independence.Conditional
+          lake build Mathlib.Probability.Distributions.Gaussian.Real
+          lake build Mathlib.Probability.Distributions.Gaussian.Multivariate
+          lake build Mathlib.InformationTheory.Hamming
 
-          echo "Scanning Lean files for proof holes / placeholders..."
-
-          # Ignore .lake dependency files; scan your project only.
-          FILES="$(find . -path './.lake' -prune -o -name '*.lean' -type f -print)"
-
-          echo "$FILES"
-
-          ! grep -RIn --include='*.lean' \
-            -e '\bsorry\b' \
-            -e '\badmit\b' \
-            -e '\bunsafe\b' \
-            -e '\bopaque\b' \
-            -e '\bconstant\b' \
-            -e '\baxiom\b' \
-            -e 'TODO' \
-            -e 'FIXME' \
-            -- PACXAI PACXAI.lean lakefile.lean || {
-              echo "Forbidden token found."
-              exit 1
-            }
-
-      - name: Print theorem axioms if files exist
+      - name: Make upload payload
         run: |
           set -euxo pipefail
 
-          cat > PrintAxioms.lean <<'EOF'
-          import PACXAI
+          rm -rf payload
+          mkdir -p payload
 
-          #check PACXAI.helloLevel2_ok
-          #check PACXAI.helloLevel3_ok
+          # Source identifiers.
+          cp mathlib4/lean-toolchain payload/lean-toolchain
+          cp mathlib4/lake-manifest.json payload/lake-manifest.json || true
+          cp mathlib4/lakefile.lean payload/lakefile.lean || true
+          cp mathlib4/lakefile.toml payload/lakefile.toml || true
 
-          #print axioms PACXAI.helloLevel2_ok
-          #print axioms PACXAI.helloLevel3_ok
+          # Dependency source packages.
+          mkdir -p payload/.lake
+          rsync -a mathlib4/.lake/packages payload/.lake/
+
+          # Build cache for mathlib itself.
+          mkdir -p payload/.lake/build
+          rsync -a mathlib4/.lake/build/ payload/.lake/build/
+
+          # Build caches for dependencies.
+          for pkg in mathlib4/.lake/packages/*; do
+            if [ -d "$pkg/.lake/build" ]; then
+              name="$(basename "$pkg")"
+              mkdir -p "payload/.lake/packages/$name/.lake"
+              rsync -a "$pkg/.lake/build" "payload/.lake/packages/$name/.lake/"
+            fi
+
+            if [ -f "$pkg/lean-toolchain" ]; then
+              name="$(basename "$pkg")"
+              mkdir -p "payload/.lake/packages/$name"
+              cp "$pkg/lean-toolchain" "payload/.lake/packages/$name/lean-toolchain"
+            fi
+
+            if [ -f "$pkg/lakefile.lean" ]; then
+              name="$(basename "$pkg")"
+              mkdir -p "payload/.lake/packages/$name"
+              cp "$pkg/lakefile.lean" "payload/.lake/packages/$name/lakefile.lean"
+            fi
+
+            if [ -f "$pkg/lakefile.toml" ]; then
+              name="$(basename "$pkg")"
+              mkdir -p "payload/.lake/packages/$name"
+              cp "$pkg/lakefile.toml" "payload/.lake/packages/$name/lakefile.toml"
+            fi
+          done
+
+          cat > payload/README_UPLOAD_THIS.txt <<'EOF'
+          mathlib4 cache bundle
+
+          This bundle contains:
+            payload/.lake/packages/*
+            payload/.lake/build/*
+            payload/lean-toolchain
+            payload/lake-manifest.json
+
+          Intended use after upload:
+            1. Unzip this bundle.
+            2. Copy payload/.lake/packages into the mathlib root as .lake/packages.
+            3. Copy payload/.lake/build into the mathlib root as .lake/build.
+            4. Use Lean v4.30.0-rc2.
+            5. Run lake build / lake env lean as needed.
+
+          This was produced by GitHub Actions.
           EOF
 
-          lake env lean PrintAxioms.lean 2>&1 | tee print-axioms.log || true
+      - name: Zip upload payload
+        run: |
+          set -euxo pipefail
+          zip -r -9 mathlib4_cache_bundle.zip payload
 
-      - name: Upload logs
+          echo "Bundle size:"
+          ls -lh mathlib4_cache_bundle.zip
+
+          sha256sum mathlib4_cache_bundle.zip | tee mathlib4_cache_bundle.zip.sha256
+
+      - name: Split bundle into upload-safe parts
+        run: |
+          set -euxo pipefail
+
+          mkdir -p upload_parts
+
+          # 480 MiB parts, below ChatGPT's 512 MB limit.
+          split -b 480M -d -a 3 \
+            mathlib4_cache_bundle.zip \
+            upload_parts/mathlib4_cache_bundle.zip.part
+
+          # Rename split output from part000 to part001, etc.
+          i=1
+          for f in upload_parts/mathlib4_cache_bundle.zip.part*; do
+            new="$(printf 'upload_parts/mathlib4_cache_bundle.zip.part%03d' "$i")"
+            mv "$f" "$new"
+            i=$((i+1))
+          done
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def sha256_file(path: Path) -> str:
+              h = hashlib.sha256()
+              with path.open("rb") as f:
+                  for block in iter(lambda: f.read(1024 * 1024), b""):
+                      h.update(block)
+              return h.hexdigest()
+
+          original = Path("mathlib4_cache_bundle.zip")
+          parts_dir = Path("upload_parts")
+          parts = sorted(parts_dir.glob("mathlib4_cache_bundle.zip.part*"))
+
+          manifest = {
+              "bundle_type": "mathlib4_cache_bundle_from_github_actions",
+              "lean_version": "leanprover/lean4:v4.30.0-rc2",
+              "original_file": original.name,
+              "original_size_bytes": original.stat().st_size,
+              "original_size_mib": original.stat().st_size / (1024 * 1024),
+              "original_sha256": sha256_file(original),
+              "chunk_mib": 480,
+              "parts": [
+                  {
+                      "filename": p.name,
+                      "size_bytes": p.stat().st_size,
+                      "size_mib": p.stat().st_size / (1024 * 1024),
+                      "sha256": sha256_file(p),
+                  }
+                  for p in parts
+              ],
+              "reassemble_linux_command": "cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip",
+              "reassemble_macos_command": "cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip",
+              "upload_instruction": "Upload every .partNNN file plus this manifest. Keep filenames unchanged.",
+          }
+
+          out = parts_dir / "mathlib4_cache_bundle.zip.manifest.json"
+          out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+          print(json.dumps(manifest, indent=2))
+          PY
+
+          echo "Upload parts:"
+          ls -lh upload_parts
+
+      - name: Upload artifact - split parts
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: lean-mathlib-build-logs
+          name: mathlib4-cache-bundle-upload-parts
+          path: upload_parts/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload artifact - full zip and hash
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib4-cache-bundle-full-zip
           path: |
-            lean-build.log
-            print-axioms.log
-            lake-manifest.json
-            lean-toolchain
+            mathlib4_cache_bundle.zip
+            mathlib4_cache_bundle.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
