@@ -13,7 +13,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y zstd unzip zip tar curl git rsync
+          sudo apt-get install -y zstd unzip zip tar curl git rsync coreutils
 
       - name: Install elan
         run: |
@@ -70,7 +70,9 @@ jobs:
         run: |
           set -euxo pipefail
           cd mathlib4
+
           lake update
+
           echo "Downloaded packages:"
           find .lake/packages -maxdepth 1 -mindepth 1 -type d -print | sort
 
@@ -78,6 +80,7 @@ jobs:
         run: |
           set -euxo pipefail
           cd mathlib4
+
           lake exe cache get
 
       - name: Build target mathlib modules
@@ -109,14 +112,14 @@ jobs:
 
           mkdir -p payload/.lake
 
-          # Source dependencies
+          # Source dependencies.
           rsync -a mathlib4/.lake/packages payload/.lake/
 
-          # mathlib build cache
+          # mathlib build cache.
           mkdir -p payload/.lake/build
           rsync -a mathlib4/.lake/build/ payload/.lake/build/
 
-          # dependency build caches
+          # dependency build caches.
           for pkg in mathlib4/.lake/packages/*; do
             if [ -d "$pkg/.lake/build" ]; then
               name="$(basename "$pkg")"
@@ -152,12 +155,14 @@ jobs:
             payload/lean-toolchain
             payload/lake-manifest.json
 
-          Intended use after upload:
-            1. Unzip this bundle.
-            2. Copy payload/.lake/packages into the mathlib root as .lake/packages.
-            3. Copy payload/.lake/build into the mathlib root as .lake/build.
-            4. Use Lean v4.30.0-rc2.
-            5. Run lake build / lake env lean as needed.
+          Intended use after download:
+            1. Put all mathlib4_cache_bundle.zip.partNNN files in one folder.
+            2. Run:
+                 cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip
+            3. Unzip mathlib4_cache_bundle.zip.
+            4. Copy payload/.lake/packages into the mathlib root as .lake/packages.
+            5. Copy payload/.lake/build into the mathlib root as .lake/build.
+            6. Use Lean v4.30.0-rc2.
 
           This was produced by GitHub Actions.
           EOF
@@ -173,10 +178,11 @@ jobs:
 
           sha256sum mathlib4_cache_bundle.zip | tee mathlib4_cache_bundle.zip.sha256
 
-      - name: Split bundle into upload-safe parts
+      - name: Split bundle into 480M parts and make manifest
         run: |
           set -euxo pipefail
 
+          rm -rf upload_parts
           mkdir -p upload_parts
 
           split -b 480M -d -a 3 \
@@ -225,7 +231,7 @@ jobs:
               ],
               "reassemble_linux_command": "cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip",
               "reassemble_macos_command": "cat mathlib4_cache_bundle.zip.part* > mathlib4_cache_bundle.zip",
-              "upload_instruction": "Upload every .partNNN file plus this manifest. Keep filenames unchanged.",
+              "upload_instruction": "Download/upload every .partNNN artifact plus the manifest. Keep filenames unchanged."
           }
 
           out = parts_dir / "mathlib4_cache_bundle.zip.manifest.json"
@@ -237,20 +243,98 @@ jobs:
           echo "Upload parts:"
           ls -lh upload_parts
 
-      - name: Upload artifact - split parts
+      - name: Upload manifest as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib4-cache-bundle-upload-parts
-          path: upload_parts/*
+          name: mathlib-cache-manifest
+          path: upload_parts/mathlib4_cache_bundle.zip.manifest.json
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload artifact - full zip and hash
+      - name: Upload part001 as separate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mathlib4-cache-bundle-full-zip
-          path: |
-            mathlib4_cache_bundle.zip
-            mathlib4_cache_bundle.zip.sha256
+          name: mathlib-cache-part001
+          path: upload_parts/mathlib4_cache_bundle.zip.part001
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part002 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part002
+          path: upload_parts/mathlib4_cache_bundle.zip.part002
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part003 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part003
+          path: upload_parts/mathlib4_cache_bundle.zip.part003
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part004 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part004
+          path: upload_parts/mathlib4_cache_bundle.zip.part004
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part005 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part005
+          path: upload_parts/mathlib4_cache_bundle.zip.part005
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part006 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part006
+          path: upload_parts/mathlib4_cache_bundle.zip.part006
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part007 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part007
+          path: upload_parts/mathlib4_cache_bundle.zip.part007
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part008 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part008
+          path: upload_parts/mathlib4_cache_bundle.zip.part008
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part009 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part009
+          path: upload_parts/mathlib4_cache_bundle.zip.part009
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload part010 as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-part010
+          path: upload_parts/mathlib4_cache_bundle.zip.part010
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload checksum as separate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mathlib-cache-full-zip-sha256
+          path: mathlib4_cache_bundle.zip.sha256
           if-no-files-found: error
           retention-days: 7
