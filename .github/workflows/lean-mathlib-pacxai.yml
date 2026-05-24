@@ -1,0 +1,204 @@
+name: Lean mathlib PACXAI test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  test-lean-mathlib:
+    name: Build PACXAI with Lean/mathlib
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show repository files
+        run: |
+          echo "Repository root:"
+          pwd
+          echo
+          echo "Files:"
+          find . -maxdepth 3 -type f | sort | sed 's#^\./##'
+
+      - name: Install elan
+        run: |
+          set -euxo pipefail
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Verify elan
+        run: |
+          set -euxo pipefail
+          elan --version
+
+      - name: Ensure Lean toolchain file
+        run: |
+          set -euxo pipefail
+
+          if [ ! -f lean-toolchain ]; then
+            echo "No lean-toolchain found. Creating one pinned to Lean v4.30.0-rc2."
+            echo "leanprover/lean4:v4.30.0-rc2" > lean-toolchain
+          fi
+
+          echo "lean-toolchain:"
+          cat lean-toolchain
+
+      - name: Install selected Lean toolchain
+        run: |
+          set -euxo pipefail
+          elan toolchain install "$(cat lean-toolchain)"
+          lean --version
+          lake --version
+
+      - name: Create lakefile if missing
+        run: |
+          set -euxo pipefail
+
+          if [ ! -f lakefile.lean ] && [ ! -f lakefile.toml ]; then
+            cat > lakefile.lean <<'EOF'
+          import Lake
+          open Lake DSL
+
+          package «pacxai» where
+            -- add package configuration options here
+
+          require mathlib from git
+            "https://github.com/leanprover-community/mathlib4.git" @ "master"
+
+          @[default_target]
+          lean_lib PACXAI where
+            roots := #[`PACXAI]
+          EOF
+          fi
+
+          echo "Lake file:"
+          if [ -f lakefile.lean ]; then
+            cat lakefile.lean
+          else
+            cat lakefile.toml
+          fi
+
+      - name: Ensure PACXAI root file if missing
+        run: |
+          set -euxo pipefail
+
+          mkdir -p PACXAI
+
+          if [ ! -f PACXAI.lean ]; then
+            cat > PACXAI.lean <<'EOF'
+          import PACXAI.Level2
+          import PACXAI.Level3
+          EOF
+          fi
+
+          if [ ! -f PACXAI/Level2.lean ]; then
+            cat > PACXAI/Level2.lean <<'EOF'
+          /-
+          Placeholder Level2 file.
+
+          Replace this with the PACXAI/Level2.lean file from the project zip if it
+          is not already committed to the repository.
+          -/
+
+          namespace PACXAI
+
+          def helloLevel2 : Nat := 2
+
+          theorem helloLevel2_ok : helloLevel2 = 2 := rfl
+
+          end PACXAI
+          EOF
+          fi
+
+          if [ ! -f PACXAI/Level3.lean ]; then
+            cat > PACXAI/Level3.lean <<'EOF'
+          /-
+          Placeholder Level3 file.
+
+          Replace this with the PACXAI/Level3.lean file from the project zip if it
+          is not already committed to the repository.
+          -/
+
+          namespace PACXAI
+
+          def helloLevel3 : Nat := 3
+
+          theorem helloLevel3_ok : helloLevel3 = 3 := rfl
+
+          end PACXAI
+          EOF
+          fi
+
+      - name: Lake update
+        run: |
+          set -euxo pipefail
+          lake update
+
+      - name: Get mathlib cache
+        run: |
+          set -euxo pipefail
+          lake exe cache get || true
+
+      - name: Build project
+        run: |
+          set -euxo pipefail
+          lake build 2>&1 | tee lean-build.log
+
+      - name: Check for forbidden proof holes
+        run: |
+          set -euxo pipefail
+
+          echo "Scanning Lean files for proof holes / placeholders..."
+
+          # Ignore .lake dependency files; scan your project only.
+          FILES="$(find . -path './.lake' -prune -o -name '*.lean' -type f -print)"
+
+          echo "$FILES"
+
+          ! grep -RIn --include='*.lean' \
+            -e '\bsorry\b' \
+            -e '\badmit\b' \
+            -e '\bunsafe\b' \
+            -e '\bopaque\b' \
+            -e '\bconstant\b' \
+            -e '\baxiom\b' \
+            -e 'TODO' \
+            -e 'FIXME' \
+            -- PACXAI PACXAI.lean lakefile.lean || {
+              echo "Forbidden token found."
+              exit 1
+            }
+
+      - name: Print theorem axioms if files exist
+        run: |
+          set -euxo pipefail
+
+          cat > PrintAxioms.lean <<'EOF'
+          import PACXAI
+
+          #check PACXAI.helloLevel2_ok
+          #check PACXAI.helloLevel3_ok
+
+          #print axioms PACXAI.helloLevel2_ok
+          #print axioms PACXAI.helloLevel3_ok
+          EOF
+
+          lake env lean PrintAxioms.lean 2>&1 | tee print-axioms.log || true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lean-mathlib-build-logs
+          path: |
+            lean-build.log
+            print-axioms.log
+            lake-manifest.json
+            lean-toolchain
